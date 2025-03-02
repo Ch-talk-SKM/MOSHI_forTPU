@@ -12,8 +12,8 @@
 
 ## 현재 구성
 
-1. **`*_PT.py`**: PyTorch 구현체
-2. **`*_FL.py`**: Flax/JAX 구현체
+1. **`class *PT`**: PyTorch 구현체
+2. **`class *FL.py`**: Flax/JAX 구현체
 3. **가중치 복사 & 결과 비교**  
    - PyTorch 레이어의 weight를 Flax로 로드 → **forward** 출력 비교(평균 차이 등)
 
