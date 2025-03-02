@@ -6,9 +6,9 @@
 
 - TPU 환경에서 **JAX/Flax**가 PyTorch 대비 높은 효율을 내는 경우가 많아, **커스텀 연산 레이어**를 우선 변환 후 검증 중입니다.  
 - 우선 변환 대상 커스텀 레이어:
-  1. **MoshiFlexibleLinear**  
-  2. **MoshiRMSNorm**  
-  3. **MoshiGatingMLP**
+  1. **MoshiFlexibleLinear** : https://github.com/huggingface/transformers/blob/main/src/transformers/models/moshi/modeling_moshi.py#L253  
+  2. **MoshiRMSNorm** : https://github.com/huggingface/transformers/blob/main/src/transformers/models/moshi/modeling_moshi.py#L231
+  3. **MoshiGatingMLP** : https://github.com/huggingface/transformers/blob/main/src/transformers/models/moshi/modeling_moshi.py#L408
 
 ## 현재 구성
 
