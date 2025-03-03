@@ -9,6 +9,8 @@
   1. **MoshiFlexibleLinear** : https://github.com/huggingface/transformers/blob/main/src/transformers/models/moshi/modeling_moshi.py#L253  
   2. **MoshiRMSNorm** : https://github.com/huggingface/transformers/blob/main/src/transformers/models/moshi/modeling_moshi.py#L231
   3. **MoshiGatingMLP** : https://github.com/huggingface/transformers/blob/main/src/transformers/models/moshi/modeling_moshi.py#L408
+  4. **MoshiRotaryEmbedding** : https://github.com/huggingface/transformers/blob/main/src/transformers/models/moshi/modeling_moshi.py#L311
+  5. **MoshiAttention** : https://github.com/huggingface/transformers/blob/main/src/transformers/models/moshi/modeling_moshi.py#L446
 
 ## 현재 구성
 
@@ -26,6 +28,7 @@
 2. 테스트 스크립트 실행
    ```bash
    python layer_unit_test_TPU.py
+   python layer_unit_test_TPU_att_rope.py
    ```
    - 변환된 레이어들에 대해 **PyTorch vs. Flax** 수치 비교 메시지가 출력됩니다.
 
