@@ -13,6 +13,7 @@ layer_unit_test_TPU_att_rope_compare3.py
 - RoPE, flexible linear, etc. 모두 테스트
 - 최종적으로 *PT_origin vs. *FL 일치가 가장 중요, 추가로 *PT vs. *FL, *PT_origin vs. *PT도 함께 확인.
 """
+from typing import Any, Optional, Union
 
 import math
 import numpy as np
@@ -455,12 +456,13 @@ class MoshiRotaryEmbeddingPT(pt_nn.Module):
         sin = sin.unsqueeze(0)
         return cos, sin
 
-
+'''
 # 5) MoshiAttentionPT
 class MoshiAttentionPT(pt_nn.Module):
     """
     PyTorch MoshiAttention, can toggle rope usage,
     can also toggle flexible linear usage in q_proj/k_proj/v_proj/o_proj.
+    Now supports layer_idx to handle flexible usage for each projection.
     """
     def __init__(
         self,
@@ -486,7 +488,7 @@ class MoshiAttentionPT(pt_nn.Module):
         config = DummyMoshiConfig(
             hidden_size=hidden_size,
             num_attention_heads=num_heads,
-            rope_scaling={"rope_type": rope_type} if rope_type!="default" else None,
+            rope_scaling={"rope_type": rope_type} if rope_type != "default" else None,
             rope_theta=rope_theta,
             num_codebooks=num_codebooks,
             head_dim=head_dim,
@@ -503,35 +505,160 @@ class MoshiAttentionPT(pt_nn.Module):
 
         self.attention_dropout = 0.0
 
-    def forward(self, hidden_states, attention_mask=None, position_ids=None):
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        position_ids=None,
+        layer_idx=None   # <--- New argument
+    ):
+        """
+        layer_idx: None or int or 1D tensor
+          - if self.use_flexible_linear=True, we pass layer_idx to each projection (q/k/v/o).
+        """
         bsz, q_len, _ = hidden_states.size()
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
 
+        # Q, K, V
+        q = self.q_proj(hidden_states, layer_idx=layer_idx)
+        k = self.k_proj(hidden_states, layer_idx=layer_idx)
+        v = self.v_proj(hidden_states, layer_idx=layer_idx)
+
+        # reshape => (B, num_heads, seq_len, head_dim)
         q = q.view(bsz,q_len,self.num_heads,self.head_dim).transpose(1,2)
         k = k.view(bsz,q_len,self.num_heads,self.head_dim).transpose(1,2)
         v = v.view(bsz,q_len,self.num_heads,self.head_dim).transpose(1,2)
 
+        # optional rope
         if self.use_rope and self.rotary_emb is not None and position_ids is not None:
             cos,sin = self.rotary_emb(v, position_ids)
-            q,k = apply_rotary_pos_emb(q,k,cos,sin)
+            q,k = apply_rotary_pos_emb(q, k, cos, sin)
 
+        # repeat kv if needed
         k = repeat_kv(k, self.num_key_value_groups)
         v = repeat_kv(v, self.num_key_value_groups)
 
+        # scaled dot-product
         attn_weights = torch.matmul(q, k.transpose(2,3)) * self.scaling
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
         attn_weights = torch.softmax(attn_weights, dim=-1)
         attn_weights = F.dropout(attn_weights, p=self.attention_dropout, training=self.training)
 
+        # apply to v
         attn_output = torch.matmul(attn_weights, v).transpose(1,2).contiguous()
-        attn_output = attn_output.view(bsz,q_len,-1)
-        attn_output = self.o_proj(attn_output)
+        attn_output = attn_output.view(bsz, q_len, -1)
+
+        # final projection
+        attn_output = self.o_proj(attn_output, layer_idx=layer_idx)
 
         return attn_output
+'''
 
+class MoshiAttentionPT(pt_nn.Module):
+    """
+    PyTorch MoshiAttention, can toggle rope usage and flexible linear usage.
+    Now supports `layer_idx` so we can do flexible usage in Q/K/V/O projections
+    (if use_flexible_linear=True).
+    """
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        head_dim: int,
+        num_codebooks: int = 1,
+        use_flexible_linear: bool = False,
+        rope: bool = True,
+        rope_theta: float = 10000.0,
+        rope_type: str = "default"
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.num_key_value_heads = num_heads
+        self.num_key_value_groups = 1
+        self.scaling = 1.0 / math.sqrt(head_dim)
+        self.use_rope = rope
+        self.rope_type = rope_type
+
+        # 예: DummyMoshiConfig는 사용자 프로젝트에 이미 존재한다고 가정
+        config = DummyMoshiConfig(
+            hidden_size=hidden_size,
+            num_attention_heads=num_heads,
+            rope_scaling={"rope_type": rope_type} if rope_type != "default" else None,
+            rope_theta=rope_theta,
+            num_codebooks=num_codebooks,
+            head_dim=head_dim,
+        )
+
+        # Q/K/V/O projection
+        # (MoshiLinearPT 내부에서 use_flexible_linear=True이면 MoshiFlexibleLinearPT가 쓰임)
+        self.q_proj = MoshiLinearPT(hidden_size, num_heads * head_dim, num_codebooks, use_flexible_linear)
+        self.k_proj = MoshiLinearPT(hidden_size, num_heads * head_dim, num_codebooks, use_flexible_linear)
+        self.v_proj = MoshiLinearPT(hidden_size, num_heads * head_dim, num_codebooks, use_flexible_linear)
+        self.o_proj = MoshiLinearPT(num_heads * head_dim, hidden_size, num_codebooks, use_flexible_linear)
+
+        # Rotary embedding (RoPE) optional
+        if rope:
+            self.rotary_emb = MoshiRotaryEmbeddingPT(config)
+        else:
+            self.rotary_emb = None
+
+        # optional dropout for attn weights
+        self.attention_dropout = 0.0
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        layer_idx: Optional[Union[int, torch.Tensor]] = None,  # <--- 새로 추가
+    ) -> torch.Tensor:
+        """
+        layer_idx: None/int/1D tensor.
+          - If use_flexible_linear=True, we pass layer_idx to each projection
+            so that different weight slices can be used per layer_idx.
+          - If None, normal usage (no slicing).
+        """
+
+        bsz, seq_len, _ = hidden_states.size()
+
+        # 1) Q, K, V proj (with layer_idx)
+        q = self.q_proj(hidden_states, layer_idx=layer_idx)
+        k = self.k_proj(hidden_states, layer_idx=layer_idx)
+        v = self.v_proj(hidden_states, layer_idx=layer_idx)
+
+        # 2) reshape => (B, num_heads, seq_len, head_dim)
+        q = q.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # 3) optional rotary embedding
+        if self.use_rope and self.rotary_emb is not None and position_ids is not None:
+            cos, sin = self.rotary_emb(v, position_ids)  # commonly pass 'v' just for device shape
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        # 4) scaled dot-product
+        # repeat_kv => (B, nHeads, S, head_dim) if we needed multiple groups
+        k = repeat_kv(k, self.num_key_value_groups)
+        v = repeat_kv(v, self.num_key_value_groups)
+
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scaling
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+
+        attn_weights = torch.softmax(attn_weights, dim=-1)
+        attn_weights = F.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+
+        # 5) apply attn weights to V
+        attn_output = torch.matmul(attn_weights, v)  # (B, nHeads, S, head_dim)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(bsz, seq_len, -1)
+
+        # 6) final output projection
+        attn_output = self.o_proj(attn_output, layer_idx=layer_idx)
+
+        return attn_output
 
 ###############################################################################
 # 3) Flax classes => *_FL
@@ -682,7 +809,19 @@ class MoshiAttentionFL(nn.Module):
     rope_type: str="default"
 
     @nn.compact
-    def __call__(self, hidden_states, attention_mask=None, position_ids=None):
+    #def __call__(self, hidden_states, attention_mask=None, position_ids=None):
+    #def __call__(self, hidden_states, attention_mask=None, position_ids=None, layer_idx=None):
+    def __call__(
+        self,
+        hidden_states: jnp.ndarray,
+        attention_mask: Optional[jnp.ndarray] = None,
+        position_ids: Optional[jnp.ndarray] = None,
+        layer_idx: Optional[Union[int, jnp.ndarray, torch.Tensor]] = None
+    ):
+
+        if isinstance(layer_idx, torch.Tensor):
+            layer_idx = jnp.array(layer_idx.detach().cpu().numpy(), dtype=jnp.int32)
+
         B,S,D = hidden_states.shape
 
         q_lin = MoshiLinearFL(self.hidden_size, self.num_heads*self.head_dim, self.num_codebooks, self.use_flexible_linear, name="q_proj")
@@ -690,9 +829,13 @@ class MoshiAttentionFL(nn.Module):
         v_lin = MoshiLinearFL(self.hidden_size, self.num_heads*self.head_dim, self.num_codebooks, self.use_flexible_linear, name="v_proj")
         o_lin = MoshiLinearFL(self.num_heads*self.head_dim, self.hidden_size, self.num_codebooks, self.use_flexible_linear, name="o_proj")
 
-        q = q_lin(hidden_states).reshape((B,S,self.num_heads,self.head_dim)).transpose((0,2,1,3))
-        k = k_lin(hidden_states).reshape((B,S,self.num_heads,self.head_dim)).transpose((0,2,1,3))
-        v = v_lin(hidden_states).reshape((B,S,self.num_heads,self.head_dim)).transpose((0,2,1,3))
+        #q = q_lin(hidden_states).reshape((B,S,self.num_heads,self.head_dim)).transpose((0,2,1,3))
+        #k = k_lin(hidden_states).reshape((B,S,self.num_heads,self.head_dim)).transpose((0,2,1,3))
+        #v = v_lin(hidden_states).reshape((B,S,self.num_heads,self.head_dim)).transpose((0,2,1,3))
+        q = q_lin(hidden_states, layer_idx=layer_idx).reshape((B,S,self.num_heads,self.head_dim)).transpose((0,2,1,3))
+        k = k_lin(hidden_states, layer_idx=layer_idx).reshape((B,S,self.num_heads,self.head_dim)).transpose((0,2,1,3))
+        v = v_lin(hidden_states, layer_idx=layer_idx).reshape((B,S,self.num_heads,self.head_dim)).transpose((0,2,1,3))
+
 
         if self.rope and position_ids is not None:
             config = DummyMoshiConfig(
@@ -711,7 +854,9 @@ class MoshiAttentionFL(nn.Module):
         attn_weights = nn.softmax(attn_weights, axis=-1)
         out = jnp.einsum("bhqk,bhkd->bhqd", attn_weights, v)
         out = out.transpose((0,2,1,3)).reshape((B,S,self.num_heads*self.head_dim))
-        out = o_lin(out)
+
+        #out = o_lin(out)
+        out = o_lin(out, layer_idx=layer_idx)
         return out
 
 
