@@ -456,104 +456,6 @@ class MoshiRotaryEmbeddingPT(pt_nn.Module):
         sin = sin.unsqueeze(0)
         return cos, sin
 
-'''
-# 5) MoshiAttentionPT
-class MoshiAttentionPT(pt_nn.Module):
-    """
-    PyTorch MoshiAttention, can toggle rope usage,
-    can also toggle flexible linear usage in q_proj/k_proj/v_proj/o_proj.
-    Now supports layer_idx to handle flexible usage for each projection.
-    """
-    def __init__(
-        self,
-        hidden_size,
-        num_heads,
-        head_dim,
-        num_codebooks=1,
-        use_flexible_linear=False,
-        rope=True,
-        rope_theta=10000.0,
-        rope_type="default"
-    ):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.head_dim = head_dim
-        self.num_key_value_heads = num_heads
-        self.num_key_value_groups = 1
-        self.scaling = 1.0 / (head_dim**0.5)
-        self.use_rope = rope
-        self.rope_type = rope_type
-
-        config = DummyMoshiConfig(
-            hidden_size=hidden_size,
-            num_attention_heads=num_heads,
-            rope_scaling={"rope_type": rope_type} if rope_type != "default" else None,
-            rope_theta=rope_theta,
-            num_codebooks=num_codebooks,
-            head_dim=head_dim,
-        )
-        self.q_proj = MoshiLinearPT(hidden_size, num_heads*head_dim, num_codebooks, use_flexible_linear)
-        self.k_proj = MoshiLinearPT(hidden_size, num_heads*head_dim, num_codebooks, use_flexible_linear)
-        self.v_proj = MoshiLinearPT(hidden_size, num_heads*head_dim, num_codebooks, use_flexible_linear)
-        self.o_proj = MoshiLinearPT(num_heads*head_dim, hidden_size, num_codebooks, use_flexible_linear)
-
-        if rope:
-            self.rotary_emb = MoshiRotaryEmbeddingPT(config)
-        else:
-            self.rotary_emb = None
-
-        self.attention_dropout = 0.0
-
-    def forward(
-        self,
-        hidden_states,
-        attention_mask=None,
-        position_ids=None,
-        layer_idx=None   # <--- New argument
-    ):
-        """
-        layer_idx: None or int or 1D tensor
-          - if self.use_flexible_linear=True, we pass layer_idx to each projection (q/k/v/o).
-        """
-        bsz, q_len, _ = hidden_states.size()
-
-        # Q, K, V
-        q = self.q_proj(hidden_states, layer_idx=layer_idx)
-        k = self.k_proj(hidden_states, layer_idx=layer_idx)
-        v = self.v_proj(hidden_states, layer_idx=layer_idx)
-
-        # reshape => (B, num_heads, seq_len, head_dim)
-        q = q.view(bsz,q_len,self.num_heads,self.head_dim).transpose(1,2)
-        k = k.view(bsz,q_len,self.num_heads,self.head_dim).transpose(1,2)
-        v = v.view(bsz,q_len,self.num_heads,self.head_dim).transpose(1,2)
-
-        # optional rope
-        if self.use_rope and self.rotary_emb is not None and position_ids is not None:
-            cos,sin = self.rotary_emb(v, position_ids)
-            q,k = apply_rotary_pos_emb(q, k, cos, sin)
-
-        # repeat kv if needed
-        k = repeat_kv(k, self.num_key_value_groups)
-        v = repeat_kv(v, self.num_key_value_groups)
-
-        # scaled dot-product
-        attn_weights = torch.matmul(q, k.transpose(2,3)) * self.scaling
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-        attn_weights = torch.softmax(attn_weights, dim=-1)
-        attn_weights = F.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-
-        # apply to v
-        attn_output = torch.matmul(attn_weights, v).transpose(1,2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, -1)
-
-        # final projection
-        attn_output = self.o_proj(attn_output, layer_idx=layer_idx)
-
-        return attn_output
-'''
-
 class MoshiAttentionPT(pt_nn.Module):
     """
     PyTorch MoshiAttention, can toggle rope usage and flexible linear usage.
@@ -817,6 +719,7 @@ class MoshiAttentionFL(nn.Module):
         attention_mask: Optional[jnp.ndarray] = None,
         position_ids: Optional[jnp.ndarray] = None,
         layer_idx: Optional[Union[int, jnp.ndarray, torch.Tensor]] = None
+        #layer_idx: Optional[Union[int, jnp.ndarray]] = None  #
     ):
 
         if isinstance(layer_idx, torch.Tensor):
@@ -872,7 +775,8 @@ def load_pytorch_weights_into_flax_attention(pt_attn, flax_attn, rng, sample_inp
     if position_ids is not None:
         pi_jnp = jnp.array(position_ids.detach().cpu().numpy())
 
-    variables = flax_attn.init(rng, sample_input_jnp, am_jnp, pi_jnp)
+    #variables = flax_attn.init(rng, sample_input_jnp, am_jnp, pi_jnp)
+    variables = flax_attn.init(rng, sample_input_jnp, am_jnp, pi_jnp, 0)  # layer_idx=0
     new_params = dict(variables["params"])
 
     for proj_name in ["q_proj","k_proj","v_proj","o_proj"]:
