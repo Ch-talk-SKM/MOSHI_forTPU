@@ -2,7 +2,7 @@
 # coding=utf-8
 
 """
-layer_unit_test_MoshiModel.py
+layer_unit_test_MoshiModel_flex_cases.py
 
 - 목적: Flexible Linear on/off, codebook 개수 변화를 다양하게 테스트.
 - 크게 3가지 케이스를 각각 시험:
