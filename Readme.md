@@ -1,6 +1,6 @@
 # Moshi Custom Layers: PyTorch → Flax/JAX for TPU
 
-이 저장소는 **`modeling_moshi.py`**의 핵심 커스텀 레이어들을 **TPU 최적화**를 위해 **PyTorch에서 Flax/JAX로 변환**하고, 두 버전이 **동일하게 동작**하는지 확인하기 위한 단위 테스트를 담고 있습니다.
+이 저장소는 **`modeling_moshi.py`**의 핵심 커스텀 레이어들을 **TPU 최적화**를 위해 **PyTorch에서 Flax/JAX로 변환**하고, 두 버전이 **동일하게 동작**하는지 확인하기 위한 단위 테스트 및 **기본 학습 스크립트**를 담고 있습니다.
 
 ## 주요 배경
 
@@ -40,6 +40,16 @@
   - **`MoshiDepthDecoderPT`** vs **`MoshiDepthDecoderFL`**를 테스트  
   - 오디오 전용 디코더 구조에 대한 PyTorch ↔ Flax 매핑 검증 및 layer_idx 동작 확인  
 
+### Flax 기반 학습 스크립트
+
+- **`train_model.py`**  
+  - Flax/JAX로 구현된 간단한 **학습** 예시 코드  
+  - **단일 디바이스 ** (TODO: 멀티 디바이스(pmap) 상황에서 GPU 1개 상황에서 에러..)
+  - 배치 사이즈가 나누어떨어지지 않을 때 leftover를 **dummy 샘플**로 패딩해 shape 불일치를 방지  
+  - `attention_mask`가 (B, S) 형태로 들어올 경우, (B, 1, 1, S)로 확장하여 (B, nHeads, S, S)와 브로드캐스팅이 가능하도록 처리  
+  - `cross_entropy` 기반 간단 손실 함수와 AdamW 옵티마이저, Orbax를 이용한 체크포인트 로직 포함  
+  - 향후 **gradient_accumulation**, **lr_scheduler**(warmup, decay 등), **bfloat16 최적화**, **beam search** 등의 확장 가능성을 남김  
+
 ## 사용 방법
 
 1. **Python 환경 준비**  
@@ -63,8 +73,18 @@
    ```
    - 변환된 레이어 및 모델들에 대해 **PyTorch vs. Flax** 수치 비교 메시지가 출력됩니다.
 
-3. **에러가 없다면**  
-   - “mean diff = 0.00xxx” 형태로 오차가 나오며, 문제없이 변환되었음을 의미합니다.
+3. **Flax 학습 스크립트(train_model.py) 실행**  
+   - **단일 디바이스**(GPU) 환경에서 동작  
+   - `batch_size`, `dataset_size`, `num_train_epochs`, `dtype(bf16/fp16)`, `swap_moshi_user` 등 하이퍼파라미터 조정 가능  
+   - leftover 배치 자동 패딩, attention mask 확장 등의 로직 확인  
+   ```bash
+   python train_model.py --dataset_size 40 --batch_size 16 --max_length 256 \
+       --num_train_epochs 5 --dtype bf16 --learning_rate 1e-4
+   ```
+   - Orbax 체크포인트를 통해 주기적으로 `TrainState` 저장 및 복원 가능  
+
+4. **에러가 없다면**  
+   - “mean diff = 0.00xxx” 형태로 테스트 스크립트에서 오차가 나오거나, train_model.py에서는 학습이 정상 수행됨  
 
 ## 앞으로의 작업
 
@@ -73,13 +93,13 @@
    - 추후 *modeling_moshi.py*의 상위 모델(예: `MoshiForConditionalGeneration`) 전체를 Flax로 이식  
 
 2. **Flax 학습 루프 구성**  
-   - TrainState(Optax 등)으로 TPU에서 학습  
-   - 멀티코어(pmap), jit 등 분산/컴파일 로직 적용  
+   - 현재 `train_model.py`는 단순 로직 예시  
+   - 추후 **gradient_accumulation_steps**, **lr_scheduler**(warmup, decay) 추가  
+   - 멀티코어(pmap), jit 등 분산/컴파일 로직 확장 + 대규모 데이터셋에서 실제 성능 검증  
 
 3. **테스트 & 디버깅**     
    - float16 / bfloat16 등 TPU-friendly dtype 확인  
-
----
+   - 체크포인트 크기 문제 시 **orbax async checkpoint** 등 최적화 고려  
 
 ## 1-1) 이미 구현 완료("어느정도" 테스트/검증됨)
 
