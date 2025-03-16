@@ -39,7 +39,7 @@ from layer_unit_test_TPU_att_rope_compare3 import (
 )
 
 # -------------------------------------------------------------------------
-# 1) PyTorch GatingMLP: local class (optionally we could also import if exist)
+# 1) PyTorch GatingMLP: local class
 # -------------------------------------------------------------------------
 class MoshiGatingMLPPT(nn.Module):
     """
@@ -71,7 +71,6 @@ class MoshiGatingMLPPT(nn.Module):
         if self.num_codebooks <= 1:
             x = self.fc1(x)
         else:
-            # optionally pass layer_idx if needed by MoshiFlexibleLinearPT
             x = self.fc1(x, layer_idx=layer_idx)
 
         B, S, D = x.shape
@@ -89,13 +88,12 @@ class MoshiGatingMLPPT(nn.Module):
 
 # -------------------------------------------------------------------------
 # 2) PyTorch MoshiDecoderLayerPT
-#    - uses official MoshiAttentionPT from layer_unit_test_TPU_att_rope_compare3.py
 # -------------------------------------------------------------------------
 class MoshiDecoderLayerPT(nn.Module):
     """
     PyTorch decoder layer that uses:
-      - self_attn = MoshiAttentionPT (now with layer_idx)
-      - MLP = MoshiGatingMLPPT (can also accept layer_idx)
+      - self_attn = MoshiAttentionPT
+      - MLP = MoshiGatingMLPPT
       - RMSNorm = MoshiRMSNormPT
     """
     def __init__(self, config, layer_idx: int, use_flexible_linear: bool, use_rope: bool = True):
@@ -104,7 +102,7 @@ class MoshiDecoderLayerPT(nn.Module):
         self.hidden_size = config.hidden_size
         self.use_flexible_linear = use_flexible_linear
 
-        # Self-Attn (MoshiAttentionPT) - now supports layer_idx
+        # Self-Attn
         self.self_attn = MoshiAttentionPT(
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
@@ -113,7 +111,7 @@ class MoshiDecoderLayerPT(nn.Module):
             use_flexible_linear=use_flexible_linear,
             rope=use_rope,
             rope_theta=getattr(config, "rope_theta", 10000.0),
-            rope_type="default",  # 혹은 config.rope_scaling["rope_type"] 등
+            rope_type="default",
         )
 
         # MLP (Gating)
@@ -137,19 +135,20 @@ class MoshiDecoderLayerPT(nn.Module):
         layer_idx_mlp: Optional[Union[int, torch.Tensor]] = None,
     ) -> torch.Tensor:
         """
-        We pass layer_idx_attn into self_attn, and layer_idx_mlp into MLP,
-        enabling flexible linear usage for both.
+        If layer_idx_attn/MLP is None => flexible usage will interpret as "S==num_layers" scenario.
+        If layer_idx_attn/MLP is int => single codebook.
+        If it's 1D => tokenwise codebook usage.
         """
+
         # 1) Pre-norm + self-attn
         residual = hidden_states
         x = self.input_layernorm(hidden_states)
 
-        # Self-attn with potential flexible usage
         x = self.self_attn(
             x,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            layer_idx=layer_idx_attn,
+            layer_idx=layer_idx_attn,  # pass as is
         )
         x = residual + x
 
@@ -157,7 +156,6 @@ class MoshiDecoderLayerPT(nn.Module):
         residual = x
         x2 = self.post_attention_layernorm(x)
 
-        # Gating MLP with potential flexible usage
         x2 = self.mlp(x2, layer_idx=layer_idx_mlp)
         out = residual + x2
 
@@ -188,7 +186,6 @@ class MoshiDecoderLayerFL(fnn.Module):
             if getattr(self.config, "rope_scaling", None)
             else "default"
         )
-        # imported MoshiAttentionFL (which does accept layer_idx)
         self.self_attn = MoshiAttentionFL(
             hidden_size=self.config.hidden_size,
             num_heads=self.config.num_attention_heads,
@@ -217,10 +214,11 @@ class MoshiDecoderLayerFL(fnn.Module):
         layer_idx_mlp: Optional[Union[int,jnp.ndarray]]=None
     ) -> jnp.ndarray:
         x = self.input_layernorm(hidden_states)
-        # MoshiAttentionFL does have layer_idx => pass layer_idx_attn
         attn_out = self.self_attn(
-            x, attention_mask=attention_mask,
-            position_ids=position_ids, layer_idx=layer_idx_attn
+            x,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            layer_idx=layer_idx_attn
         )
         x = hidden_states + attn_out
 
@@ -262,11 +260,14 @@ def load_decoder_layer_pt_to_flax(
     am_np = attention_mask.detach().cpu().numpy() if attention_mask is not None else None
     pi_np = position_ids.detach().cpu().numpy() if position_ids is not None else None
 
+    # init => do *not* override None => we want to keep None as is, so "S==num_layers" usage can be tested
     init_vars = fl_layer.init(
         rng,
         jnp.array(h_np),
         None if am_np is None else jnp.array(am_np),
         None if pi_np is None else jnp.array(pi_np),
+        layer_idx_attn=0,  # dummy init => 0
+        layer_idx_mlp=0
     )
     fl_params = copy.deepcopy(init_vars["params"])
 
@@ -294,9 +295,10 @@ def load_decoder_layer_pt_to_flax(
         jnp.array(h_np),
         None if am_np is None else jnp.array(am_np),
         None if pi_np is None else jnp.array(pi_np),
+        layer_idx=0
     )
     fl_attn_params_dict = load_pytorch_weights_into_flax_attention(
-        pt_layer.self_attn,  # note: self.self_attn doesn't accept layer_idx, but param is the same
+        pt_layer.self_attn,
         dummy_fl_attn,
         rng,
         sample_hidden_states,
@@ -319,12 +321,14 @@ def load_decoder_layer_pt_to_flax(
     dummy_init_mlp = dummy_fl_mlp.init(
         rng,
         jnp.array(h_np),
+        layer_idx=0
     )
     fl_mlp_params_dict = load_pt_weights_gatingmlp(
         pt_layer.mlp,
         dummy_fl_mlp,
         rng,
-        sample_hidden_states
+        sample_hidden_states,
+        layer_idx=0
     )
     fl_params["mlp"] = merge_params_dict(
         fl_params["mlp"],
@@ -350,7 +354,7 @@ def compare_decoder_layers_pt_fl(
 ):
     import numpy as np
     with torch.no_grad():
-        # "MoshiAttentionPT.forward()" doesn't accept layer_idx => so let's ignore layer_idx_attn
+        # pass layer_idx_attn/mlp to PT
         out_pt = pt_layer(
             hidden_states_pt,
             attention_mask=attention_mask,
@@ -360,20 +364,29 @@ def compare_decoder_layers_pt_fl(
         )
     out_pt_np = out_pt.detach().cpu().numpy()
 
-    # Convert layer_idx_mlp from torch->jax if needed
-    if isinstance(layer_idx_mlp, torch.Tensor):
-        layer_idx_mlp = jax.numpy.array(layer_idx_mlp.detach().cpu().numpy(), dtype=jax.numpy.int32)
+    # convert layer_idx_mlp from torch->jax if needed
+    def to_jnp_idx(x):
+        if isinstance(x, torch.Tensor):
+            return jnp.array(x.detach().cpu().numpy(), dtype=jnp.int32)
+        return x
 
-    am_jnp = None if attention_mask is None else jnp.array(attention_mask.detach().cpu().numpy())
-    pi_jnp = None if position_ids is None else jnp.array(position_ids.detach().cpu().numpy())
+    layer_idx_attn_j = to_jnp_idx(layer_idx_attn)
+    layer_idx_mlp_j  = to_jnp_idx(layer_idx_mlp)
+
+    am_jnp = None
+    if attention_mask is not None:
+        am_jnp = jnp.array(attention_mask.detach().cpu().numpy())
+    pi_jnp = None
+    if position_ids is not None:
+        pi_jnp = jnp.array(position_ids.detach().cpu().numpy())
 
     out_fl = fl_layer.apply(
         {"params": fl_params["params"]},
         jnp.array(hidden_states_pt.detach().cpu().numpy()),
         am_jnp,
         pi_jnp,
-        layer_idx_attn=layer_idx_attn,  # FL does accept layer_idx_attn
-        layer_idx_mlp=layer_idx_mlp
+        layer_idx_attn=layer_idx_attn_j,
+        layer_idx_mlp=layer_idx_mlp_j
     )
     out_fl_np = np.array(out_fl)
 
@@ -401,30 +414,24 @@ def main_decoder_layer_test():
     use_flexible_linear = True
     use_rope = True
 
-    # Create PT / FL layer
-    # PT layer: *cannot* handle layer_idx_attn in attention (MoshiAttentionPT has no 'layer_idx' param)
     pt_layer = MoshiDecoderLayerPT(config, layer_idx, use_flexible_linear, use_rope).eval()
-    # FL layer: can handle layer_idx_attn
     fl_layer = MoshiDecoderLayerFL(config, use_flexible_linear, use_rope)
 
-    # random input
     B, S = 2, 5
     hidden_states_pt = torch.randn(B, S, config.hidden_size)
 
-    # WARNING: random mask => big difference in softmax
+    # e.g. random mask
     attention_mask_pt = torch.randn(B, 1, S, S)
-    #attention_mask_pt = torch.zeros(B, 1, S, S)  # no mask
-
-
     position_ids_pt = torch.tensor([[0,1,2,3,4],[10,11,12,13,14]], dtype=torch.long)
 
-    # init
     rng = jax.random.PRNGKey(0)
     fl_init_params = fl_layer.init(
         rng,
         jnp.array(hidden_states_pt.detach().cpu().numpy()),
         jnp.array(attention_mask_pt.detach().cpu().numpy()),
-        jnp.array(position_ids_pt.detach().cpu().numpy())
+        jnp.array(position_ids_pt.detach().cpu().numpy()),
+        layer_idx_attn=0,
+        layer_idx_mlp=0
     )
 
     # PT->FL param load
@@ -434,7 +441,6 @@ def main_decoder_layer_test():
         hidden_states_pt, attention_mask_pt, position_ids_pt
     )
 
-    # Scenarios
     scenario_list = [
         (None, None),
         (0, 1),
